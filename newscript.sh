@@ -163,6 +163,8 @@ case ${answer:0:1} in
     ;;
 esac
 
+echo "${GREEN}Selesai.${NC}"
+
 
 
 
