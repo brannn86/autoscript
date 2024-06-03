@@ -1,125 +1,118 @@
 #!/bin/bash
-python /home/student/Code/app.py
 
-# Define color codes
+# color codes
 RED="$(tput setaf 1)"
 GREEN="$(tput setaf 2)"
 YELLOW="$(tput setaf 3)"
 BLUE="$(tput setaf 4)"
 NC="$(tput sgr0)" # No Color
 
-# logging & kirim email
-LOGFILE="/var/log/security_audit.log"
-NMAP_REPORT="var/log/nmap_report.log"
+# directories
+HOME_DIR="/home/$USER"
 
-# intro
-cat << "EOF"
-   ___       __                   _      __            __ 
-  / _ |__ __/ /____  ___ ________(_)__  / /_      ___ / / 
- / __ / // / __/ _ \(_-</ __/ __/ / _ \/ __/ _   (_-</ _ \
-/_/ |_\_,_/\__/\___/___/\__/_/ /_/ .__/\__/ (_) /___/_//_/
-                                /_/                       
-EOF
-
-# update pkg
-update_packages() {
-    echo -e "${BLUE}Updating package lists...${NC}"
-    sudo apt update
-    echo -e "${BLUE}Upgrading installed packages...${NC}"
-    sudo apt upgrade -y
-    echo -e "${BLUE}Autoremove unnecessary packages...${NC}"
-    sudo apt autoremove -y
-    echo -e "${GREEN}Package update complete.${NC}"
+# fungsi ubah permissions ke user yang berwenang saja
+change_permissions() {
+    local file="$1"
+    chmod 700 "$file"
+    echo "Changed permissions for $file to 700"
 }
 
-read -p "${YELLOW}Do you want to update the system packages? (y/n): ${NC}" answer
+# cek semua file di home user
+check_permissions() {
+    echo "Checking file permissions in $HOME_DIR..."
 
-case ${answer:0:1} in
-    y|Y )
-        update_packages
-    ;;
-    * )
-        echo "${RED}Update canceled.${NC}"
-    ;;
-esac
+find "$HOME_DIR" -type f | while read -r file; do
+    current_permissions=$(stat -c "%a" "$file")
+    if [ "$current_permissions" != "700" ]; then
+        change_permissions "$file"
+    else
+        echo "Permissions for $file are already set to 700"
+    fi
+done
 
-# run unattended-upgrades
-{
-    echo "${BLUE}Running unattended-upgrades...${NC}"
-    sudo unattended-upgrades -d
-} 2>&1 | tee -a "$LOGFILE"
+echo "Permission check and update complete."
+}
 
-# install lynis check
-if ! command -v lynis &> /dev/null;
-    then 
-    {
-    echo "${BLUE}Lynis not installed. Installing Lynis...${NC}"
-    sudo apt-get install -y lynis
-    } 2>&1 | tee -a "$LOGFILE"
-fi
+# list ip yang diizinkan
+ALLOWED_IPS=(
+    "192.168.56.1/24"
+    "192.168.1.64/24"
+    "10.0.0.0/16"
+)
 
-# run lynis
-{
-    echo "${BLUE}Running Lynis audit...${NC}"
-    sudo lynis audit system >> $LYNIS_REPORT 2>&1
-} 2>&1 | tee -a "$LOGFILE"
+# list ports
+ALLOWED_PORTS=(
+    "2222"  # NEW SSH
+    "80"  # HTTP
+    "443" # HTTPS
+)
 
-read -p "${YELLOW}Do you want to apply fixes according to Lynis report? (y/n): ${NC}" answer
+# konfigurasi firewall
+configure_firewall() {
+    # Flush existing rules to start fresh
+    sudo iptables -F
 
-case ${answer:0:1} in
-    y|Y )
-        python3 app.py
-    ;;
-    * )
-        echo "${RED}Autofix skipped.${NC}"
-    ;;
-esac
+    # Default policy to drop all incoming connections
+    sudo iptables -P INPUT DROP
 
-# # Parse Lynis report and apply automatic fixes (example)
-# LYNIS_REPORT="/var/log/lynis-report.dat"
+    # Allow established and related connections
+    sudo iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# # Parse Lynis report and apply automatic fixes
-# if [ -f "$LYNIS_REPORT" ]; then
-#     echo "Parsing Lynis report and applying fixes..." | tee -a $LOGFILE
+    # Loop through allowed IPs and set rules for each
+    for ip in "${ALLOWED_IPS[@]}"; do
+        for port in "${ALLOWED_PORTS[@]}"; do
+            sudo iptables -A INPUT -p tcp -s "$ip" --dport "$port" -j ACCEPT
+        done
+    done
 
-#     # Example: Fix SSH root login if reported
-#     if grep -q "SSH-7412" "$LYNIS_REPORT"; then
-#         echo "Disabling SSH root login..." | tee -a $LOGFILE
-#         sudo sed -i 's/^PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
-#         sudo systemctl restart sshd
-#     fi
+    # Allow localhost to ensure local applications can function correctly
+    sudo iptables -A INPUT -i lo -j ACCEPT
 
-#     # Example: Configure firewall if suggested
-#     if grep -q "FIRE-4590" "$LYNIS_REPORT"; then
-#         echo "Configuring firewall..." | tee -a $LOGFILE
-#         sudo apt-get install -y ufw
-#         sudo ufw enable
-#         sudo ufw default deny incoming
-#         sudo ufw default allow outgoing
-#         sudo ufw allow ssh
-#         sudo ufw reload
-#     fi
+    # port opening
+    # Open port 2222 for IPv4
+    sudo iptables -I INPUT -p tcp -m tcp --dport 2222 -j ACCEPT
 
-#     # Example: Set secure permissions for /tmp if suggested
-#     if grep -q "FILE-6310" "$LYNIS_REPORT"; then
-#         echo "Setting secure permissions for /tmp..." | tee -a $LOGFILE
-#         sudo mount -o remount,noexec,nosuid,nodev /tmp
-#     fi
+    echo "Ports 2222 is now open."
 
-#     # Add more fixes based on Lynis report findings
-#     # ...
+    # Port closing
+    # Close port 22 (SSH) for IPv4
+    sudo iptables -A INPUT -p tcp --dport 22 -j REJECT
+    sudo iptables -A OUTPUT -p tcp --sport 22 -j REJECT
 
-# fi
+    echo "Ports 22 closed successfully."
 
-# # Network scanning with Nmap (Example, can be expanded)
-# {
-#     echo "Running network scan with Nmap..."
-#     nmap -sP 192.168.1.0/24 >> $NMAP_REPORT 2>&1
-# }  2>&1 | tee -a "$LOGFILE"
+    # Log dropped packets (optional, for debugging purposes)
+    sudo iptables -A INPUT -j LOG --log-prefix "IPTABLES-DROP: " --log-level 4
 
-# # Monitor logs for suspicious activities using Fail2ban
-# echo "Monitoring logs for suspicious activities..." | tee -a $LOGFILE
-# sudo systemctl start fail2ban
+    echo "Firewall rules updated successfully."
+}
 
-# end
-echo "${BLUE}Scanning completed.${NC}"
+# fungsi untuk rubah port SSH default
+change_ssh_port() {
+    NEW_PORT=2222  # Set the desired new SSH port here
+    SSH_CONFIG_FILE="/etc/ssh/sshd_config"
+
+    # Backup the existing sshd_config file
+    sudo cp "$SSH_CONFIG_FILE" "$SSH_CONFIG_FILE.bak"
+
+    # Change the SSH port
+    sudo sed -i "s/^#Port 22/Port $NEW_PORT/" "$SSH_CONFIG_FILE"
+
+    # Restart SSH service to apply the changes
+    sudo systemctl restart sshd
+
+    echo "SSH port changed to $NEW_PORT and service restarted."
+}
+
+# Function to scan open ports using nmap
+scan_open_ports() {
+    SERVER_IP="192.168.56.10"  # Replace with your server's IP address
+
+    echo "Scanning open ports on $SERVER_IP..."
+    nmap -p 2222 "$SERVER_IP"
+}
+
+#check_permissions
+configure_firewall
+change_ssh_port
+scan_open_ports
